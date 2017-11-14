@@ -56,7 +56,7 @@ public class FTPConfig {
 					new FileInputStream(fileName), "UTF-8"));
 			while ((tmp = reader.readLine()) != null) {
 
-				if (tmp.charAt(0) == '#') {
+				if ("".equals(tmp) || tmp.charAt(0) == '#') {
 					continue;
 				}
 
