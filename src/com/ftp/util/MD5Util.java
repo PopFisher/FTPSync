@@ -1,4 +1,4 @@
-package com.ftp;
+package com.ftp.util;
 import java.math.BigInteger;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;

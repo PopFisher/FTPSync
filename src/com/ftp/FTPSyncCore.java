@@ -7,7 +7,6 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.net.SocketException;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -17,20 +16,18 @@ import org.apache.commons.net.ftp.FTPClientConfig;
 import org.apache.commons.net.ftp.FTPFile;
 import org.apache.commons.net.ftp.FTPReply;
 
+import com.ftp.util.IOUtils;
+import com.ftp.util.Log;
+
 public class FTPSyncCore {
 
-	private static final Log logger = new Log();
 	private static int READ_TIMEOUT = 120000;
 	private static String ENCODING = "GBK";
 
-	private String userName; // FTP 登录用户名
-	private String password; // FTP 登录密码
-	private String ip; // FTP 服务器地址IP地址
-	private int port; // FTP 端口
 	private FTPClient ftpClient = null; // FTP 客户端代理
+	private String mLocalRootPath = "";
 	
 	public FTPSyncCore() {
-		setArg();
 	}
 	
 	/**
@@ -39,45 +36,40 @@ public class FTPSyncCore {
 	 * @return true 连接服务器成功，false 连接服务器失败
 	 */
 	public boolean connectServer() {
-		boolean flag = true;
+		boolean flag = false;
+		String address = FTPConfig.getServerAddress();
+		int port = FTPConfig.getServerPort();
+		
 		if (ftpClient == null) {
-			int reply;
 			try {
 				ftpClient = new FTPClient();
 				ftpClient.setControlEncoding(ENCODING);
-//				ftpClient.configure(getFtpConfig());
-				ftpClient.connect(ip, port);
-				ftpClient.login(userName, password);
+				ftpClient.configure(getFtpConfig());
+				ftpClient.connect(address, port);
+				ftpClient.login(FTPConfig.getUserName(), FTPConfig.getPassword());
 				ftpClient.setFileType(FTP.BINARY_FILE_TYPE);
-				// 这句话不设置会导致下载文件的时候ftpClient.listFiles()返回数据长度为0，不过在windows上貌似不会
-				// 调用FTPClient.enterLocalPassiveMode();这个方法的意思就是每次数据连接之前，
-				// ftp client告诉ftp server开通一个端口来传输数据。为什么要这样做呢，因为ftp server可能每次开启不同的端口来传输数据，
-				// 但是在linux上，由于安全限制，可能某些端口没有开启，所以就出现阻塞。
 				ftpClient.enterLocalPassiveMode();
 				ftpClient.setFileTransferMode(FTP.STREAM_TRANSFER_MODE);
 				ftpClient.setDataTimeout(READ_TIMEOUT);
-				reply = ftpClient.getReplyCode();
-				System.out.println("ftpClient buf: " + ftpClient.getBufferSize());
-				if (!FTPReply.isPositiveCompletion(reply)) {
-					ftpClient.disconnect();
-					logger.debug("FTP 服务拒绝连接！");
-					flag = false;
+				int reply = ftpClient.getReplyCode();
+
+				if (FTPReply.isPositiveCompletion(reply)) {
+					flag = true;
+					Log.info("FTP connect success!");
 				}
-			} catch (SocketException e) {
-				flag = false;
-				e.printStackTrace();
-				logger.debug("登录ftp服务器 " + ip + " 失败,连接超时！");
-			} catch (IOException e) {
-				flag = false;
-				e.printStackTrace();
-				logger.debug("登录ftp服务器 " + ip + " 失败，FTP服务器无法打开！");
+				else {
+					Log.warn("FTP refused to connect!");
+					ftpClient.disconnect();
+				}
+			} catch (Exception e) {
+				Log.error("Failed to login ftp " + address + ":" + port, e);
 			}
 		}
 		return flag;
 	}
 
 	/**
-	 * 上传文件
+	 * upload file
 	 * 
 	 * @param remoteFile
 	 *            远程文件路径,支持多级目录嵌套
@@ -85,18 +77,21 @@ public class FTPSyncCore {
 	 *            本地文件名称，绝对路径
 	 * 
 	 */
-	public boolean uploadFile(String remoteFile, File localFile)
-			throws IOException {
+	public boolean uploadFile(String remoteFile, File localFile) throws IOException {
 		boolean flag = false;
-		InputStream in = new FileInputStream(localFile);
-		String remote = new String(remoteFile.getBytes("GBK"), "iso-8859-1");
-		if (ftpClient.storeFile(remote, in)) {
-			flag = true;
-			logger.debug(localFile.getAbsolutePath() + "上传文件成功！");
-		} else {
-			logger.debug(localFile.getAbsolutePath() + "上传文件失败！");
+		InputStream input = null;
+		
+		try {
+			input = new FileInputStream(localFile);
+			String remote = new String(remoteFile.getBytes("GBK"), "iso-8859-1");
+			if (ftpClient.storeFile(remote, input)) {
+				flag = true;
+			}
+		} finally {
+			IOUtils.silenceClose(input);
 		}
-		in.close();
+		
+		Log.info("push file (" + localFile.getCanonicalPath() + ") => " + (flag ? "SUCCESS" : "FAILED"));
 		return flag;
 	}
 
@@ -122,7 +117,6 @@ public class FTPSyncCore {
 				return false;
 			}
 		}
-		FTPFile[] files = ftpClient.listFiles(new String(remoteFileName));
 		File f = new File(local);
 		if (!uploadFile(remoteFileName, f)) {
 			flag = false;
@@ -130,7 +124,10 @@ public class FTPSyncCore {
 		return flag;
 	}
 
-	private String mCurPreRootPath = "";
+	public void setLocalRootPath(String localRootPath) {
+		mLocalRootPath = localRootPath;
+	}
+	
 	/**
 	 * 上传文件夹内的所有文件
 	 * 
@@ -142,14 +139,10 @@ public class FTPSyncCore {
 	 * @throws IOException
 	 */
 	public List<Object> uploadManyFile(String filename, String uploadpath) {
-		if (mCurPreRootPath.isEmpty()) {
-			mCurPreRootPath = filename;
-			mCurPreRootPath = mCurPreRootPath.replaceAll("\\\\", "/");
-		}
 		boolean flag = true;
 		List<Object> list = new ArrayList<Object>();
 		StringBuffer strBuf = new StringBuffer();
-		int n = 0; // 上传失败的文件个数
+		int failCount = 0; // 上传失败的文件个数
 		int m = 0; // 上传成功的文件个数
 		try {
 			ftpClient.changeWorkingDirectory("/");
@@ -161,27 +154,30 @@ public class FTPSyncCore {
 				} else {
 					String local = upfile.getCanonicalPath().replaceAll("\\\\", "/");
 					String remote = uploadpath.replaceAll("\\\\", "/");
-					remote += local.substring(mCurPreRootPath.length() + (remote.endsWith("/") ? 1 : 0));
+					if (!remote.endsWith("/")) {
+						remote += "/";
+					}
+					remote += local.substring(mLocalRootPath.length() + (mLocalRootPath.endsWith("/") ? 0 : 1));
 					flag = uploadFile(local, remote);
 					ftpClient.changeWorkingDirectory("/");
 				}
 				if (!flag) {
-					n++;
+					failCount++;
 					strBuf.append(upfile.getName() + ",");
-					logger.debug("文件［" + upfile.getName() + "］上传失败");
+					Log.info("File［" + upfile.getName() + "］upload failed");
 				} else {
 					m++;
 				}
 			}
-			list.add(0, n);
+			list.add(0, failCount);
 			list.add(1, m);
 			list.add(2, strBuf.toString());
 		} catch (NullPointerException e) {
 			e.printStackTrace();
-			logger.debug("本地文件上传失败！找不到上传文件！", e);
+			Log.error("local file upload failed, the file not found！" + e);
 		} catch (Exception e) {
 			e.printStackTrace();
-			logger.debug("本地文件上传失败！", e);
+			Log.error("local file upload failed ！" + e);
 		}
 		return list;
 	}
@@ -200,20 +196,13 @@ public class FTPSyncCore {
 		// 下载文件
 		BufferedOutputStream buffOut = null;
 		try {
-			buffOut = new BufferedOutputStream(new FileOutputStream(
-					localFileName));
+			buffOut = new BufferedOutputStream(new FileOutputStream(localFileName));
 			flag = ftpClient.retrieveFile(remoteFileName, buffOut);
 		} catch (Exception e) {
 			e.printStackTrace();
-			logger.debug("本地文件下载失败！", e);
+			Log.info("local file download failed ！" + e);
 		} finally {
-			try {
-				if (buffOut != null) {
-					buffOut.close();
-				}
-			} catch (Exception e) {
-				e.printStackTrace();
-			}
+			IOUtils.silenceClose(buffOut);
 		}
 		return flag;
 	}
@@ -221,92 +210,95 @@ public class FTPSyncCore {
 	private String rootWorkingDirectory = "";
 	private int count = 0;
 	
-	public boolean loadDirectory(String remoteDirectory, String localSavePath) {
+	public boolean loadDirectory(String uploadDirectory, String remoteDirectory, String localSavePath) {
 		rootWorkingDirectory = "";
 		count = 0;
-		if (!localSavePath.endsWith(File.separator)) {
-			logger.debug("loadDirectory: " + localSavePath + " not endWith \\");
-			localSavePath += File.separator;
+		localSavePath.replaceAll("\\\\", "/");
+		if (!localSavePath.endsWith("/")) {
+			localSavePath += "/";
 		}
-		File rootFile = new File(localSavePath);
-		if (!rootFile.exists()) {
-			if (rootFile.mkdirs()) {
-				logger.debug("loadDirectory: create directory: " + rootFile.getPath());
-			}
-		}
-		
 		if (!remoteDirectory.endsWith("/")) {
-			logger.debug("loadDirectory: " + remoteDirectory + " not endWith /");
 			remoteDirectory += "/";
 		}
 		boolean change = false;
 		try {
 			change = ftpClient.changeWorkingDirectory(remoteDirectory);
-			logger.debug("loadDirectory: changeWorkingDirectory " + remoteDirectory + " result: " + change);
+			Log.info("FTP Server changeWorkingDirectory " + remoteDirectory + " result: " + change);
 			if ("".equals(rootWorkingDirectory)) {
 				rootWorkingDirectory = ftpClient.printWorkingDirectory();
 			}
 		} catch (IOException e) {
 			e.printStackTrace();
+			Log.info("changeWorkingDirectory exception " + e);
 		}
 		
-		return loadDirectoryInner(localSavePath);
+		// 需要从指定服务器目录下拉的文件名列表
+		File file = new File(uploadDirectory);
+		File[] files = file.listFiles();
+		ArrayList<String> fileNameList = new ArrayList<String>();
+		for (File file2 : files) {
+			fileNameList.add(file2.getName());
+		}
+		
+		return loadDirectoryInner(localSavePath, fileNameList);
 	}
 	
-	public boolean loadDirectoryInner(String localSavePath) {
+	public boolean loadDirectoryInner(String localSavePath, List<String> loadList) {
 		// 获取文件列表
 		FTPFile[] fs;
 		boolean result = true;
+		OutputStream is = null;
 		try {
 			count++;
-			if (count >= 10) {
-				logger.debug("loadDirectory: error");
+			if (count >= 20) {	// 避免死循环创建过多目录
+				Log.info("make directory more than 20");
 				result = false;
 				return result;
 			}
 	
 			fs = ftpClient.listFiles();
 			if (fs == null || fs.length == 0) {
-				logger.debug("ftpClient.listFiles() lenght is 0");
+				Log.info("ftpClient.listFiles() lenght is 0");
 				return false;
 			}
 			String fileNameString;
 			for (FTPFile ff : fs) {
 				fileNameString = ff.getName();
+				// 如果指定的下拉列表则需要进行过滤，不在列表里面的文件或者目录就不下载，直接跳过
+				if (loadList != null && !loadList.contains(fileNameString)) {
+					continue;
+				}
 				if (ff.isDirectory()) {
-					logger.debug("loadDirectory: " + fileNameString + " is directory");
-					logger.debug("loadDirectory: workingDirectory " + ftpClient.printWorkingDirectory());
 					File rootFile1 = new File(localSavePath + fileNameString);
 					if (!rootFile1.exists()) {
-						if (rootFile1.mkdirs()) {
-							logger.debug("loadDirectory: create directory: " + rootFile1.getPath());
-						}
+						rootFile1.mkdirs();
 					}
-					boolean change = ftpClient.changeWorkingDirectory(fileNameString);
-					logger.debug("loadDirectory: changeWorkingDirectory result: " + change);
-					loadDirectoryInner(localSavePath + fileNameString + File.separator);
+					
+					changeWorkingDirectory(fileNameString);
+					loadDirectoryInner(localSavePath + fileNameString + File.separator, null);
 				} else if(ff.isFile()) {
-					logger.debug("loadDirectory: " + fileNameString + " is file 开始下载");
-					logger.debug("loadDirectory: workingDirectory " + ftpClient.printWorkingDirectory());
 					File saveFile = new File(localSavePath + fileNameString);
-					OutputStream is = new FileOutputStream(saveFile);
+					is = new FileOutputStream(saveFile);
 					ftpClient.retrieveFile(ff.getName(), is);
-					is.close();
+					IOUtils.silenceClose(is);
 					if (saveFile.exists()) {
-						logger.debug("loadDirectory: " + fileNameString + " 下载成功");
+						Log.info("pull file (" + ftpClient.printWorkingDirectory() + "/" + fileNameString +") => OK " + saveFile.length());
+					} else {
+						Log.info("pull file (" + ftpClient.printWorkingDirectory() + "/" + fileNameString +") => ERROR");
+						result = false;
 					}
 				}
 			}
 			if (!rootWorkingDirectory.equals(ftpClient.printWorkingDirectory())) {
 				ftpClient.changeToParentDirectory();
-				logger.debug("loadDirectory: changeToParentDirectory " + ftpClient.printWorkingDirectory());
+				Log.info("change FTP Directory => " + ftpClient.printWorkingDirectory());
 			}
-		} catch (IOException e) {
-			e.printStackTrace();
-			result = false;
 		} catch (Exception e) {
 			e.printStackTrace();
 			result = false;
+			Log.error("loadDirectoryInner exception: " + e);
+		} finally {
+			IOUtils.silenceClose(is);
 		}
 		
 		return result;
@@ -320,9 +312,9 @@ public class FTPSyncCore {
 		try {
 			flag = ftpClient.deleteFile(filename);
 			if (flag) {
-				logger.debug("删除文件" + filename + "成功！");
+				Log.info("delete " + filename + " successfully!");
 			} else {
-				logger.debug("删除文件" + filename + "成功！");
+				Log.info("delete " + filename + " failed!");
 			}
 		} catch (IOException ioe) {
 			ioe.printStackTrace();
@@ -359,41 +351,6 @@ public class FTPSyncCore {
 	}
 
 	/**
-	 * 列出服务器上文件和目录
-	 * 
-	 * @param regStr
-	 *            --匹配的正则表达式
-	 */
-	public void listRemoteFiles(String regStr) {
-		try {
-			String files[] = ftpClient.listNames(regStr);
-			if (files == null || files.length == 0) {
-				logger.debug("没有任何文件!");
-			} else {
-				for (int i = 0; i < files.length; i++) {
-					System.out.println(files[i]);
-				}
-			}
-		} catch (Exception e) {
-			e.printStackTrace();
-		}
-	}
-
-	/**
-	 * 列出Ftp服务器上的所有文件和目录
-	 */
-	public void listRemoteAllFiles() {
-		try {
-			String[] names = ftpClient.listNames();
-			for (int i = 0; i < names.length; i++) {
-				System.out.println(names[i]);
-			}
-		} catch (Exception e) {
-			e.printStackTrace();
-		}
-	}
-
-	/**
 	 * 关闭连接
 	 */
 	public void closeConnect() {
@@ -422,16 +379,6 @@ public class FTPSyncCore {
 		}
 	}
 
-	/**
-	 * 设置参数
-	 */
-	private boolean setArg() {
-		userName = FTPConfig.USERNAME;
-		password = FTPConfig.USERPSD;
-		ip = FTPConfig.SERVER_IP;
-		port = FTPConfig.SERVER_PORT;
-		return true;
-	}
 
 	/**
 	 * 进入到服务器的某个目录下
@@ -439,18 +386,18 @@ public class FTPSyncCore {
 	 * @param directory
 	 */
 	public boolean changeWorkingDirectory(String directory) {
-		boolean flag = true;
+		boolean change = true;
 		try {
-			flag = ftpClient.changeWorkingDirectory(directory);
-			if (flag) {
-				logger.debug("进入文件夹" + directory + " 成功！");
+			change = ftpClient.changeWorkingDirectory(directory);
+			if (change) {
+				Log.info("change FTP Directory => " + ftpClient.printWorkingDirectory());
 			} else {
-				logger.debug("进入文件夹" + directory + " 失败！");
+				Log.info("change FTP Directory(" + directory + ") => FAILED"); 
 			}
 		} catch (IOException ioe) {
 			ioe.printStackTrace();
 		}
-		return flag;
+		return change;
 	}
 
 	/**
@@ -486,9 +433,7 @@ public class FTPSyncCore {
 	 * @return ftpConfig
 	 */
 	private FTPClientConfig getFtpConfig() {
-		// 这里要根据服务器的系统来设置，比如widows要设置为  FTPClientConfig.SYST_NT 
-		FTPClientConfig ftpConfig = new FTPClientConfig(
-				FTPClientConfig.SYST_UNIX);
+		FTPClientConfig ftpConfig = new FTPClientConfig(FTPConfig.getSystem());
 		ftpConfig.setServerLanguageCode(FTP.DEFAULT_CONTROL_ENCODING);
 		return ftpConfig;
 	}
@@ -521,10 +466,9 @@ public class FTPSyncCore {
 		try {
 			flag = ftpClient.makeDirectory(dir);
 			if (flag) {
-				logger.debug("创建文件夹" + dir + " 成功！");
-
+				Log.info("make directory " + dir + " successfully ！");
 			} else {
-				logger.debug("创建文件夹" + dir + " 失败！");
+				Log.info("make directory " + dir + " failed ！");
 			}
 		} catch (Exception e) {
 			e.printStackTrace();
@@ -576,8 +520,7 @@ public class FTPSyncCore {
 					if (makeDirectory(subDirectory)) {
 						changeWorkingDirectory(subDirectory);
 					} else {
-						logger.debug("创建目录[" + subDirectory + "]失败");
-						System.out.println("创建目录[" + subDirectory + "]失败");
+						Log.info("make directory [" + subDirectory + "] failed");
 						success = false;
 						return success;
 					}
