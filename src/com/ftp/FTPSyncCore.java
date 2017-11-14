@@ -157,13 +157,11 @@ public class FTPSyncCore {
 			File fileList[] = file.listFiles();
 			for (File upfile : fileList) {
 				if (upfile.isDirectory()) {
-					uploadManyFile(upfile.getAbsoluteFile().toString(),
-							uploadpath);
+					uploadManyFile(upfile.getAbsoluteFile().toString(), uploadpath);
 				} else {
-					String local = upfile.getCanonicalPath().replaceAll("\\\\",
-							"/");
-					String remote = uploadpath.replaceAll("\\\\", "/")
-							+ local.substring(mCurPreRootPath.length());
+					String local = upfile.getCanonicalPath().replaceAll("\\\\", "/");
+					String remote = uploadpath.replaceAll("\\\\", "/");
+					remote += local.substring(mCurPreRootPath.length() + (remote.endsWith("/") ? 1 : 0));
 					flag = uploadFile(local, remote);
 					ftpClient.changeWorkingDirectory("/");
 				}
@@ -238,7 +236,7 @@ public class FTPSyncCore {
 		}
 		
 		if (!remoteDirectory.endsWith("/")) {
-			logger.debug("loadDirectory: " + remoteDirectory + " not endWith \\");
+			logger.debug("loadDirectory: " + remoteDirectory + " not endWith /");
 			remoteDirectory += "/";
 		}
 		boolean change = false;
